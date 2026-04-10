@@ -47,8 +47,33 @@ class SentenceChunker:
         self.max_sentences_per_chunk = max(1, max_sentences_per_chunk)
 
     def chunk(self, text: str) -> list[str]:
-        # TODO: split into sentences, group into chunks
-        raise NotImplementedError("Implement SentenceChunker.chunk")
+        if not text:
+            return []
+
+        normalized = text.strip()
+        if not normalized:
+            return []
+
+        # A simple, robust sentence extractor. Keeps punctuation at end when present.
+        # Works for: ". ", "! ", "? ", and also handles newlines.
+        sentences = [
+            s.strip()
+            for s in re.findall(r"[^.!?\n]+[.!?]?(?:\s+|\n+|$)", normalized)
+            if s.strip()
+        ]
+
+        chunks: list[str] = []
+        current: list[str] = []
+        for s in sentences:
+            current.append(s)
+            if len(current) >= self.max_sentences_per_chunk:
+                chunks.append(" ".join(current).strip())
+                current = []
+
+        if current:
+            chunks.append(" ".join(current).strip())
+
+        return [c for c in chunks if c]
 
 
 class RecursiveChunker:
@@ -66,12 +91,70 @@ class RecursiveChunker:
         self.chunk_size = chunk_size
 
     def chunk(self, text: str) -> list[str]:
-        # TODO: implement recursive splitting strategy
-        raise NotImplementedError("Implement RecursiveChunker.chunk")
+        if not text:
+            return []
+        t = text.strip()
+        if not t:
+            return []
+        return [c for c in self._split(t, list(self.separators)) if c]
 
     def _split(self, current_text: str, remaining_separators: list[str]) -> list[str]:
-        # TODO: recursive helper used by RecursiveChunker.chunk
-        raise NotImplementedError("Implement RecursiveChunker._split")
+        t = current_text.strip()
+        if not t:
+            return []
+        if len(t) <= self.chunk_size:
+            return [t]
+
+        if not remaining_separators:
+            # Fall back: hard cut into fixed windows.
+            return [t[i : i + self.chunk_size].strip() for i in range(0, len(t), self.chunk_size) if t[i : i + self.chunk_size].strip()]
+
+        sep = remaining_separators[0]
+        rest = remaining_separators[1:]
+
+        # If sep is empty string, we can't split further by delimiter; hard cut.
+        if sep == "":
+            return [t[i : i + self.chunk_size].strip() for i in range(0, len(t), self.chunk_size) if t[i : i + self.chunk_size].strip()]
+
+        if sep not in t:
+            return self._split(t, rest)
+
+        parts = [p for p in t.split(sep) if p is not None and p != ""]
+
+        # First, recursively reduce any oversized parts.
+        reduced_parts: list[str] = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            if len(p) > self.chunk_size:
+                reduced_parts.extend(self._split(p, rest))
+            else:
+                reduced_parts.append(p)
+
+        # Then, merge adjacent parts back up to chunk_size.
+        merged: list[str] = []
+        buf = ""
+        joiner = sep
+        for p in reduced_parts:
+            candidate = p if not buf else f"{buf}{joiner}{p}"
+            if len(candidate) <= self.chunk_size:
+                buf = candidate
+            else:
+                if buf:
+                    merged.append(buf.strip())
+                buf = p
+        if buf:
+            merged.append(buf.strip())
+
+        # Some merged chunks might still exceed chunk_size (edge cases); reduce again.
+        final: list[str] = []
+        for m in merged:
+            if len(m) > self.chunk_size:
+                final.extend(self._split(m, rest))
+            else:
+                final.append(m)
+        return [c for c in final if c]
 
 
 def _dot(a: list[float], b: list[float]) -> float:
@@ -86,13 +169,27 @@ def compute_similarity(vec_a: list[float], vec_b: list[float]) -> float:
 
     Returns 0.0 if either vector has zero magnitude.
     """
-    # TODO: implement cosine similarity formula
-    raise NotImplementedError("Implement compute_similarity")
+    denom = (math.sqrt(_dot(vec_a, vec_a)) * math.sqrt(_dot(vec_b, vec_b)))
+    if denom == 0:
+        return 0.0
+    return _dot(vec_a, vec_b) / denom
 
 
 class ChunkingStrategyComparator:
     """Run all built-in chunking strategies and compare their results."""
 
     def compare(self, text: str, chunk_size: int = 200) -> dict:
-        # TODO: call each chunker, compute stats, return comparison dict
-        raise NotImplementedError("Implement ChunkingStrategyComparator.compare")
+        fixed_chunks = FixedSizeChunker(chunk_size=chunk_size, overlap=0).chunk(text)
+        sentence_chunks = SentenceChunker(max_sentences_per_chunk=3).chunk(text)
+        recursive_chunks = RecursiveChunker(chunk_size=chunk_size).chunk(text)
+
+        def _stats(chunks: list[str]) -> dict:
+            count = len(chunks)
+            avg_length = (sum(len(c) for c in chunks) / count) if count else 0.0
+            return {"count": count, "avg_length": avg_length, "chunks": chunks}
+
+        return {
+            "fixed_size": _stats(fixed_chunks),
+            "by_sentences": _stats(sentence_chunks),
+            "recursive": _stats(recursive_chunks),
+        }
